@@ -74,7 +74,9 @@ Outputs:
 
 The GUI has a `筛查关键字` input. The default is running-related keywords, but you can enter targets such as `打架、摔倒、抽烟、开枪、跳舞`.
 
-The extractor resumes automatically per video and keyword set. If a previous run stopped early, rerun the same command and completed or previously failed segments will be skipped. In the GUI, enable `重新从头处理` to ignore previous state and delete old clips/json for that video and keyword set before processing. In CLI mode, use `--fresh`.
+The extractor resumes automatically per video and keyword set. If a previous run stopped early, rerun the same command and completed or previously failed segments will be skipped. In the GUI, enable `重新从头处理` to ignore previous state and delete old clips/json for that video and keyword set before processing. Enable `重试失败段` to retry segments listed in `failed_segments.json`. Use `停止处理` to stop after the current ffmpeg/API call finishes safely.
+
+In CLI mode, use `--fresh` to restart or `--retry-failed` to retry failed segments.
 
 CLI test mode:
 
@@ -82,4 +84,5 @@ CLI test mode:
 python running_clip_extractor.py --video "/path/to/video.mp4" --max-segments 12
 python running_clip_extractor.py --video "/path/to/video.mp4" --keywords "打架、追逐" --max-segments 12
 python running_clip_extractor.py --video "/path/to/video.mp4" --fresh
+python running_clip_extractor.py --video "/path/to/video.mp4" --retry-failed
 ```

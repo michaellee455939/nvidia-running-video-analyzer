@@ -104,6 +104,30 @@ def parse_time_to_seconds(value) -> float:
     raise ValueError(f"无法解析时间：{value}")
 
 
+def parse_confidence(value) -> float:
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value or "").strip().lower()
+    if not text:
+        return 0.0
+    confidence_words = {
+        "high": 0.9,
+        "medium": 0.6,
+        "low": 0.3,
+        "very high": 0.95,
+        "very low": 0.15,
+        "高": 0.9,
+        "中": 0.6,
+        "中等": 0.6,
+        "低": 0.3,
+    }
+    if text in confidence_words:
+        return confidence_words[text]
+    if text.endswith("%"):
+        return float(text.rstrip("%")) / 100
+    return float(text)
+
+
 def build_detection_prompt(segment_index: int, start_time: str, end_time: str, keywords: str) -> str:
     return (
         "你是视频内容检测器。"
@@ -189,7 +213,7 @@ def normalize_detection(
     segment_duration: float,
     video_duration: float,
 ) -> dict | None:
-    confidence = float(item.get("confidence", 0))
+    confidence = parse_confidence(item.get("confidence", 0))
     if confidence < MIN_RUNNING_CONFIDENCE:
         return None
 
@@ -289,6 +313,8 @@ def detect_and_extract_running_clips(
     segment_seconds: int = SEGMENT_SECONDS,
     max_segments: int | None = None,
     fresh: bool = False,
+    retry_failed: bool = False,
+    stop_event: threading.Event | None = None,
     progress=None,
 ) -> list[dict]:
     check_ffmpeg()
@@ -327,6 +353,9 @@ def detect_and_extract_running_clips(
     state = read_json_file(state_path, {})
     completed_segments = set(state.get("completed_segments", []))
     skipped_failed_segments = {item.get("segment_index") for item in failed_segments if item.get("segment_index")}
+    if retry_failed:
+        skipped_failed_segments.clear()
+        append_log(run_log_path, "retry failed segments requested")
     if not completed_segments and extracted:
         completed_segments.update(item.get("segment_index") for item in extracted if item.get("segment_index"))
     clip_index = len(extracted) + 1
@@ -336,6 +365,12 @@ def detect_and_extract_running_clips(
     append_log(run_log_path, f"duration={duration:.3f}s total_segments={total_segments} segment_seconds={segment_seconds}")
 
     for zero_index in range(total_segments):
+        if stop_event and stop_event.is_set():
+            append_log(run_log_path, "stop requested before next segment")
+            if progress:
+                progress("已请求停止，当前进度已保存")
+            break
+
         segment_index = zero_index + 1
         segment_start = zero_index * segment_seconds
         actual_duration = min(segment_seconds, max(0.1, duration - segment_start))
@@ -360,6 +395,12 @@ def detect_and_extract_running_clips(
         append_log(run_log_path, f"segment {segment_index}/{total_segments}: proxy start {start_time}-{end_time}")
         proxy_path = make_segment_proxy_video(video_path, segment_index, segment_start, actual_duration)
         append_log(run_log_path, f"segment {segment_index}: proxy={proxy_path} size={proxy_path.stat().st_size}")
+
+        if stop_event and stop_event.is_set():
+            append_log(run_log_path, f"segment {segment_index}: stop requested after proxy generation")
+            if progress:
+                progress("已请求停止，当前进度已保存")
+            break
 
         if progress:
             progress(f"正在检测目标内容：第 {segment_index}/{total_segments} 段")
@@ -392,25 +433,30 @@ def detect_and_extract_running_clips(
                 progress(f"第 {segment_index}/{total_segments} 段检测失败，已记录并继续：{exc}")
             continue
 
-        normalized = [
-            normalized_item
-            for item in detections
-            if (
-                normalized_item := normalize_detection(
+        normalized = []
+        for item in detections:
+            try:
+                normalized_item = normalize_detection(
                     item,
                     segment_index,
                     segment_start,
                     actual_duration,
                     duration,
                 )
-            )
-        ]
+            except Exception as exc:
+                append_log(run_log_path, f"segment {segment_index}: skipped invalid detection {item}: {exc}")
+                continue
+            if normalized_item:
+                normalized.append(normalized_item)
 
         if not normalized and progress:
             progress(f"第 {segment_index}/{total_segments} 段未检测到目标内容")
         append_log(run_log_path, f"segment {segment_index}: normalized detections={len(normalized)}")
 
         for item in normalized:
+            if stop_event and stop_event.is_set():
+                append_log(run_log_path, f"segment {segment_index}: stop requested before extracting remaining clips")
+                break
             if progress:
                 progress(f"正在切出原画质目标片段：{item['absolute_start_time']} - {item['absolute_end_time']}")
             clip_path = extract_original_quality_clip(
@@ -476,6 +522,8 @@ class RunningClipExtractorApp:
         self.clip_dir = tk.StringVar(value="选择视频后自动生成")
         self.log_path = tk.StringVar(value="选择视频后自动生成")
         self.fresh_run = tk.BooleanVar(value=False)
+        self.retry_failed = tk.BooleanVar(value=False)
+        self.stop_event = threading.Event()
         self.events: queue.Queue[tuple[str, str]] = queue.Queue()
 
         self._build_ui()
@@ -488,7 +536,10 @@ class RunningClipExtractorApp:
         tk.Button(frame, text="选择视频文件", command=self.choose_video).grid(row=0, column=0, sticky="w")
         self.start_button = tk.Button(frame, text="检测并切出目标片段", command=self.start_analysis, state=tk.DISABLED)
         self.start_button.grid(row=0, column=1, sticky="w", padx=(10, 0))
-        tk.Checkbutton(frame, text="重新从头处理", variable=self.fresh_run).grid(row=0, column=2, sticky="w", padx=(10, 0))
+        self.stop_button = tk.Button(frame, text="停止处理", command=self.stop_analysis, state=tk.DISABLED)
+        self.stop_button.grid(row=0, column=2, sticky="w", padx=(10, 0))
+        tk.Checkbutton(frame, text="重新从头处理", variable=self.fresh_run).grid(row=0, column=3, sticky="w", padx=(10, 0))
+        tk.Checkbutton(frame, text="重试失败段", variable=self.retry_failed).grid(row=0, column=4, sticky="w", padx=(10, 0))
 
         tk.Label(frame, text="已选择的视频路径：").grid(row=1, column=0, sticky="nw", pady=(14, 0))
         tk.Label(frame, textvariable=self.video_path, anchor="w", justify="left", wraplength=700).grid(
@@ -583,20 +634,40 @@ class RunningClipExtractorApp:
             messagebox.showerror("缺少 API Key", "请先设置 NVIDIA_API_KEY 环境变量。")
             return
 
+        self.stop_event.clear()
         self.start_button.config(state=tk.DISABLED)
+        self.stop_button.config(state=tk.NORMAL)
         self.output.delete("1.0", tk.END)
         self.status.set("开始处理")
         keywords = normalize_keywords(self.keywords.get())
         self._refresh_output_paths()
-        thread = threading.Thread(target=self._run_analysis, args=(selected, keywords, self.fresh_run.get()), daemon=True)
+        thread = threading.Thread(
+            target=self._run_analysis,
+            args=(selected, keywords, self.fresh_run.get(), self.retry_failed.get()),
+            daemon=True,
+        )
         thread.start()
 
-    def _run_analysis(self, selected: str, keywords: str, fresh: bool) -> None:
+    def stop_analysis(self) -> None:
+        self.stop_event.set()
+        self.status.set("正在停止，等待当前 ffmpeg/API 调用结束")
+        self.output.insert(tk.END, "已请求停止；会在当前片段安全结束后停止。\n")
+        self.output.see(tk.END)
+        self.stop_button.config(state=tk.DISABLED)
+
+    def _run_analysis(self, selected: str, keywords: str, fresh: bool, retry_failed: bool) -> None:
         try:
             def progress(message: str) -> None:
                 self.events.put(("progress", message))
 
-            results = detect_and_extract_running_clips(selected, keywords=keywords, fresh=fresh, progress=progress)
+            results = detect_and_extract_running_clips(
+                selected,
+                keywords=keywords,
+                fresh=fresh,
+                retry_failed=retry_failed,
+                stop_event=self.stop_event,
+                progress=progress,
+            )
             self.events.put(("success", json.dumps(results, ensure_ascii=False, indent=2)))
         except Exception as exc:
             DEBUG_DIR.mkdir(parents=True, exist_ok=True)
@@ -620,11 +691,13 @@ class RunningClipExtractorApp:
             self.output.insert(tk.END, payload)
             messagebox.showinfo("完成", "目标片段检测与原画质切片完成。")
             self.start_button.config(state=tk.NORMAL)
+            self.stop_button.config(state=tk.DISABLED)
         else:
             self.status.set("失败")
             self.output.insert(tk.END, "\n" + payload)
             messagebox.showerror("处理失败", payload)
             self.start_button.config(state=tk.NORMAL)
+            self.stop_button.config(state=tk.DISABLED)
 
         self.root.after(100, self._poll_events)
 
@@ -643,6 +716,7 @@ def main() -> None:
     parser.add_argument("--keywords", default=DEFAULT_KEYWORDS, help="Target keywords to detect, separated by comma or Chinese comma.")
     parser.add_argument("--max-segments", type=int, help="Only analyze the first N segments in CLI mode.")
     parser.add_argument("--fresh", action="store_true", help="Ignore resume state and start from the first segment.")
+    parser.add_argument("--retry-failed", action="store_true", help="Retry segments recorded in failed_segments.json.")
     args = parser.parse_args()
 
     if args.video:
@@ -651,6 +725,7 @@ def main() -> None:
             keywords=args.keywords,
             max_segments=args.max_segments,
             fresh=args.fresh,
+            retry_failed=args.retry_failed,
             progress=print,
         )
         print(json.dumps(results, ensure_ascii=False, indent=2))
