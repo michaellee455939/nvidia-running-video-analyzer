@@ -35,6 +35,14 @@ RUNNING_CLIP_DIR = APP_DIR / "running_clips_original"
 MIN_RUNNING_CONFIDENCE = 0.45
 NVIDIA_RETRIES = 3
 DEFAULT_KEYWORDS = "奔跑、跑步、快跑、冲刺、追逐、逃跑、运动奔跑"
+WINDOWS_PREPROCESS_MODE_LABELS = {
+    "默认模式（普通视频推荐，保持原逻辑）": "default",
+    "高速模式（CPU高，速度最快）": "fast",
+    "平衡模式（大视频推荐，约80% CPU）": "balanced",
+    "温和模式（约60% CPU）": "gentle",
+    "低CPU模式（最慢，最低占用）": "low_cpu",
+}
+WINDOWS_PREPROCESS_MODE_NAMES = {value: key for key, value in WINDOWS_PREPROCESS_MODE_LABELS.items()}
 
 
 def safe_stem(path: str | Path) -> str:
@@ -322,9 +330,7 @@ def detect_and_extract_running_clips(
     max_segments: int | None = None,
     fresh: bool = False,
     retry_failed: bool = False,
-    low_cpu: bool = True,
-    ffmpeg_threads: int = 1,
-    include_audio_proxy: bool = False,
+    windows_large_video_mode: str = "default",
     stop_event: threading.Event | None = None,
     progress=None,
 ) -> list[dict]:
@@ -374,10 +380,7 @@ def detect_and_extract_running_clips(
     append_log(run_log_path, f"start/resume video={Path(video_path).expanduser().resolve()}")
     append_log(run_log_path, f"keywords={keywords}")
     append_log(run_log_path, f"duration={duration:.3f}s total_segments={total_segments} segment_seconds={segment_seconds}")
-    append_log(
-        run_log_path,
-        f"low_cpu={low_cpu} ffmpeg_threads={ffmpeg_threads} include_audio_proxy={include_audio_proxy}",
-    )
+    append_log(run_log_path, f"windows_large_video_mode={windows_large_video_mode}")
 
     for zero_index in range(total_segments):
         if stop_event and stop_event.is_set():
@@ -413,9 +416,8 @@ def detect_and_extract_running_clips(
             segment_index,
             segment_start,
             actual_duration,
-            ffmpeg_threads=ffmpeg_threads,
-            low_cpu=low_cpu,
-            include_audio=include_audio_proxy,
+            windows_large_video_mode=windows_large_video_mode,
+            log_callback=lambda message, idx=segment_index: append_log(run_log_path, f"segment {idx}: {message}"),
         )
         append_log(run_log_path, f"segment {segment_index}: proxy={proxy_path} size={proxy_path.stat().st_size}")
 
@@ -444,9 +446,7 @@ def detect_and_extract_running_clips(
                 "keywords": keywords,
                 "duration": duration,
                 "segment_seconds": segment_seconds,
-                "low_cpu": low_cpu,
-                "ffmpeg_threads": ffmpeg_threads,
-                "include_audio_proxy": include_audio_proxy,
+                "windows_large_video_mode": windows_large_video_mode,
                 "total_segments": total_segments,
                 "completed_segments": sorted(completed_segments),
                 "failed_segments": sorted(skipped_failed_segments),
@@ -508,9 +508,7 @@ def detect_and_extract_running_clips(
             "keywords": keywords,
             "duration": duration,
             "segment_seconds": segment_seconds,
-            "low_cpu": low_cpu,
-            "ffmpeg_threads": ffmpeg_threads,
-            "include_audio_proxy": include_audio_proxy,
+            "windows_large_video_mode": windows_large_video_mode,
             "total_segments": total_segments,
             "completed_segments": sorted(completed_segments),
             "failed_segments": sorted(skipped_failed_segments),
@@ -530,9 +528,7 @@ def detect_and_extract_running_clips(
         "keywords": keywords,
         "duration": duration,
         "segment_seconds": segment_seconds,
-        "low_cpu": low_cpu,
-        "ffmpeg_threads": ffmpeg_threads,
-        "include_audio_proxy": include_audio_proxy,
+        "windows_large_video_mode": windows_large_video_mode,
         "total_segments": total_segments,
         "completed_segments": sorted(completed_segments),
         "failed_segments": sorted(skipped_failed_segments),
@@ -554,9 +550,7 @@ class RunningClipExtractorApp:
         self.clip_dir = tk.StringVar(value="选择视频后自动生成")
         self.log_path = tk.StringVar(value="选择视频后自动生成")
         self.segment_seconds = tk.StringVar(value=str(SEGMENT_SECONDS))
-        self.ffmpeg_threads = tk.StringVar(value="1")
-        self.low_cpu = tk.BooleanVar(value=True)
-        self.include_audio_proxy = tk.BooleanVar(value=False)
+        self.windows_preprocess_mode = tk.StringVar(value=WINDOWS_PREPROCESS_MODE_NAMES["default"])
         self.fresh_run = tk.BooleanVar(value=False)
         self.retry_failed = tk.BooleanVar(value=False)
         self.stop_event = threading.Event()
@@ -590,15 +584,16 @@ class RunningClipExtractorApp:
         keyword_entry.grid(row=2, column=1, columnspan=2, sticky="we", pady=(10, 0))
         keyword_entry.bind("<KeyRelease>", lambda _event: self._refresh_output_paths())
 
-        tk.Label(frame, text="性能设置：").grid(row=3, column=0, sticky="nw", pady=(10, 0))
+        tk.Label(frame, text="Windows 大视频预处理模式：").grid(row=3, column=0, sticky="nw", pady=(10, 0))
         perf_frame = tk.Frame(frame)
         perf_frame.grid(row=3, column=1, columnspan=4, sticky="we", pady=(10, 0))
         tk.Label(perf_frame, text="每段秒数").pack(side=tk.LEFT)
         tk.Entry(perf_frame, textvariable=self.segment_seconds, width=6).pack(side=tk.LEFT, padx=(6, 14))
-        tk.Label(perf_frame, text="ffmpeg线程").pack(side=tk.LEFT)
-        tk.Entry(perf_frame, textvariable=self.ffmpeg_threads, width=4).pack(side=tk.LEFT, padx=(6, 14))
-        tk.Checkbutton(perf_frame, text="低CPU模式", variable=self.low_cpu).pack(side=tk.LEFT, padx=(0, 14))
-        tk.Checkbutton(perf_frame, text="proxy包含音频", variable=self.include_audio_proxy).pack(side=tk.LEFT)
+        tk.OptionMenu(
+            perf_frame,
+            self.windows_preprocess_mode,
+            *WINDOWS_PREPROCESS_MODE_LABELS.keys(),
+        ).pack(side=tk.LEFT)
 
         tk.Label(frame, text="原画质片段目录：").grid(row=4, column=0, sticky="nw", pady=(10, 0))
         tk.Label(frame, textvariable=self.clip_dir, anchor="w", justify="left", wraplength=700).grid(
@@ -687,7 +682,7 @@ class RunningClipExtractorApp:
         self.status.set("开始处理")
         keywords = normalize_keywords(self.keywords.get())
         segment_seconds = parse_positive_int(self.segment_seconds.get(), SEGMENT_SECONDS, minimum=5, maximum=600)
-        ffmpeg_threads = parse_positive_int(self.ffmpeg_threads.get(), 1, minimum=1, maximum=8)
+        windows_large_video_mode = WINDOWS_PREPROCESS_MODE_LABELS.get(self.windows_preprocess_mode.get(), "default")
         self._refresh_output_paths()
         thread = threading.Thread(
             target=self._run_analysis,
@@ -697,9 +692,7 @@ class RunningClipExtractorApp:
                 self.fresh_run.get(),
                 self.retry_failed.get(),
                 segment_seconds,
-                ffmpeg_threads,
-                self.low_cpu.get(),
-                self.include_audio_proxy.get(),
+                windows_large_video_mode,
             ),
             daemon=True,
         )
@@ -719,9 +712,7 @@ class RunningClipExtractorApp:
         fresh: bool,
         retry_failed: bool,
         segment_seconds: int,
-        ffmpeg_threads: int,
-        low_cpu: bool,
-        include_audio_proxy: bool,
+        windows_large_video_mode: str,
     ) -> None:
         try:
             def progress(message: str) -> None:
@@ -733,9 +724,7 @@ class RunningClipExtractorApp:
                 segment_seconds=segment_seconds,
                 fresh=fresh,
                 retry_failed=retry_failed,
-                low_cpu=low_cpu,
-                ffmpeg_threads=ffmpeg_threads,
-                include_audio_proxy=include_audio_proxy,
+                windows_large_video_mode=windows_large_video_mode,
                 stop_event=self.stop_event,
                 progress=progress,
             )
@@ -789,9 +778,12 @@ def main() -> None:
     parser.add_argument("--max-segments", type=int, help="Only analyze the first N segments in CLI mode.")
     parser.add_argument("--fresh", action="store_true", help="Ignore resume state and start from the first segment.")
     parser.add_argument("--retry-failed", action="store_true", help="Retry segments recorded in failed_segments.json.")
-    parser.add_argument("--fast-proxy", action="store_true", help="Use higher-resolution/faster default proxy settings instead of low-CPU mode.")
-    parser.add_argument("--ffmpeg-threads", type=int, default=1, help="Limit ffmpeg x264 threads. Use 1 on busy Windows machines.")
-    parser.add_argument("--include-audio-proxy", action="store_true", help="Include audio in proxy clips. Higher CPU cost.")
+    parser.add_argument(
+        "--windows-large-video-mode",
+        choices=["default", "fast", "balanced", "gentle", "low_cpu"],
+        default="default",
+        help="Manual Windows-only preprocessing mode for huge/4K/HEVC videos.",
+    )
     args = parser.parse_args()
 
     if args.video:
@@ -802,9 +794,7 @@ def main() -> None:
             max_segments=args.max_segments,
             fresh=args.fresh,
             retry_failed=args.retry_failed,
-            low_cpu=not args.fast_proxy,
-            ffmpeg_threads=args.ffmpeg_threads,
-            include_audio_proxy=args.include_audio_proxy,
+            windows_large_video_mode=args.windows_large_video_mode,
             progress=print,
         )
         print(json.dumps(results, ensure_ascii=False, indent=2))

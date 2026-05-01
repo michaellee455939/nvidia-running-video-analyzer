@@ -119,16 +119,42 @@ Outputs:
 
 The GUI has a `筛查关键字` input. The default is running-related keywords, but you can enter targets such as `打架、摔倒、抽烟、开枪、跳舞`.
 
-For very large files on Windows, keep `低CPU模式` enabled. The default GUI settings use one ffmpeg thread, lower-resolution proxy clips, and no audio in proxy clips to avoid maxing out CPU. If the source is 4K/large bitrate, start with:
+### Windows Large Video Preprocessing
 
-- `每段秒数`: `30` or `60`
-- `ffmpeg线程`: `1`
-- `低CPU模式`: enabled
-- `proxy包含音频`: disabled unless audio is required for the search target
+The GUI includes `Windows 大视频预处理模式`. This is a manual Windows-only optimization for very large or high-spec sources such as 60GB+ files, 4K, HEVC Main10, HDR/Dolby Vision, or high-bitrate Remux files.
+
+Use `默认模式（普通视频推荐，保持原逻辑）` for ordinary videos such as small clips, normal 1080p/H.264 files, and short social media material. Default mode keeps the original proxy generation behavior and does not force h264_nvenc, low resolution, no audio, or thread limits.
+
+For large Windows videos:
+
+- `平衡模式（大视频推荐，约80% CPU）`: recommended for most large-video processing.
+- `高速模式（CPU高，速度最快）`: use when the computer is idle or overnight.
+- `温和模式（约60% CPU）`: use while doing other work on the PC.
+- `低CPU模式（最慢，最低占用）`: use when the computer is prone to stalling.
+
+Large-video modes use NVIDIA `h264_nvenc` for proxy encoding when ffmpeg supports it, with 8-bit-compatible proxy output:
+
+```text
+-vf scale=-2:240:flags=fast_bilinear,format=yuv420p
+-c:v h264_nvenc
+-preset fast
+-b:v 800k
+-profile:v main
+-pix_fmt yuv420p
+-an
+```
+
+If `h264_nvenc` is unavailable or fails, the tool automatically falls back to CPU libx264 low-thread proxy generation and logs:
+
+```text
+h264_nvenc 不可用或失败，已回退到 CPU 低线程模式
+```
+
+On older GPUs such as GTX970, NVENC only helps with H.264 proxy encoding. 4K HEVC Main10 decode may still rely heavily on CPU, so use `平衡模式`, `温和模式`, or `低CPU模式` when the PC becomes sluggish. This large-video preprocessing mode is not smart/dynamic CPU adjustment; it is a manual mode selector.
 
 The extractor resumes automatically per video and keyword set. If a previous run stopped early, rerun the same command and completed or previously failed segments will be skipped. In the GUI, enable `重新从头处理` to ignore previous state and delete old clips/json for that video and keyword set before processing. Enable `重试失败段` to retry segments listed in `failed_segments.json`. Use `停止处理` to stop after the current ffmpeg/API call finishes safely.
 
-In CLI mode, use `--fresh` to restart or `--retry-failed` to retry failed segments. Low-CPU proxy generation is enabled by default; use `--ffmpeg-threads 1`, `--segment-seconds 30`, and leave audio out of proxy clips for large videos.
+In CLI mode, use `--fresh` to restart or `--retry-failed` to retry failed segments. For Windows large-video preprocessing, use `--windows-large-video-mode balanced`, `fast`, `gentle`, or `low_cpu`. The default is `default`, which keeps ordinary-video behavior.
 
 CLI test mode:
 
@@ -137,7 +163,7 @@ python running_clip_extractor.py --video "/path/to/video.mp4" --max-segments 12
 python running_clip_extractor.py --video "/path/to/video.mp4" --keywords "打架、追逐" --max-segments 12
 python running_clip_extractor.py --video "/path/to/video.mp4" --fresh
 python running_clip_extractor.py --video "/path/to/video.mp4" --retry-failed
-python running_clip_extractor.py --video "/path/to/video.mp4" --segment-seconds 30 --ffmpeg-threads 1
+python running_clip_extractor.py --video "/path/to/video.mp4" --windows-large-video-mode balanced
 ```
 
 Windows CLI examples:
@@ -146,5 +172,6 @@ Windows CLI examples:
 .venv\Scripts\python.exe running_clip_extractor.py --video "C:\Users\you\Videos\movie.mp4" --keywords "跑步,追逐"
 .venv\Scripts\python.exe running_clip_extractor.py --video "C:\Users\you\Videos\movie.mp4" --fresh
 .venv\Scripts\python.exe running_clip_extractor.py --video "C:\Users\you\Videos\movie.mp4" --retry-failed
-.venv\Scripts\python.exe running_clip_extractor.py --video "C:\Users\you\Videos\movie.mp4" --segment-seconds 30 --ffmpeg-threads 1
+.venv\Scripts\python.exe running_clip_extractor.py --video "C:\Users\you\Videos\movie.mp4" --windows-large-video-mode balanced
+.venv\Scripts\python.exe running_clip_extractor.py --video "C:\Users\you\Videos\movie.mp4" --windows-large-video-mode gentle
 ```

@@ -34,6 +34,7 @@ from app import (
 APP_DIR = Path(__file__).resolve().parent
 SEGMENT_PROXY_DIR = APP_DIR / "segment_proxies"
 SEGMENT_SECONDS = 60
+WINDOWS_LARGE_VIDEO_MODES = {"fast", "balanced", "gentle", "low_cpu"}
 
 
 def format_time(seconds: float) -> str:
@@ -66,6 +67,142 @@ def get_video_duration(video_path: str | Path) -> float:
     return float(result.stdout.strip())
 
 
+def windows_large_video_thread_args(mode: str) -> list[str]:
+    if mode == "balanced":
+        return ["-threads", "3", "-filter_threads", "1", "-filter_complex_threads", "1"]
+    if mode == "gentle":
+        return ["-threads", "2", "-filter_threads", "1", "-filter_complex_threads", "1"]
+    if mode == "low_cpu":
+        return ["-threads", "1", "-filter_threads", "1", "-filter_complex_threads", "1"]
+    return []
+
+
+def run_ffmpeg(cmd: list[str], below_normal_priority: bool = False) -> subprocess.CompletedProcess:
+    creationflags = subprocess.BELOW_NORMAL_PRIORITY_CLASS if os.name == "nt" and below_normal_priority else 0
+    return subprocess.run(cmd, capture_output=True, text=True, creationflags=creationflags)
+
+
+def make_windows_large_video_proxy(
+    ffmpeg: str,
+    input_path: Path,
+    output_path: Path,
+    start_seconds: float,
+    duration_seconds: float,
+    mode: str,
+    log_callback=None,
+) -> Path:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    thread_args = windows_large_video_thread_args(mode)
+    temp_nvenc = output_path.with_name(output_path.stem + "_nvenc_try.mp4")
+    temp_cpu = output_path.with_name(output_path.stem + "_cpu_fallback.mp4")
+    scale_filter = "scale=-2:240:flags=fast_bilinear,format=yuv420p"
+
+    if log_callback:
+        log_callback(
+            "proxy mode=%s windows_large_video=True encoder=h264_nvenc threads=%s output=%s"
+            % (mode, "unlimited" if not thread_args else " ".join(thread_args), temp_nvenc)
+        )
+
+    nvenc_cmd = [
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+        *thread_args,
+        "-y",
+        "-ss",
+        f"{start_seconds:.3f}",
+        "-t",
+        f"{duration_seconds:.3f}",
+        "-i",
+        str(input_path),
+        "-map",
+        "0:v:0",
+        "-dn",
+        "-sn",
+        "-vf",
+        scale_filter,
+        "-c:v",
+        "h264_nvenc",
+        "-preset",
+        "fast",
+        "-b:v",
+        "800k",
+        "-profile:v",
+        "main",
+        "-pix_fmt",
+        "yuv420p",
+        "-an",
+        str(temp_nvenc),
+    ]
+    result = run_ffmpeg(nvenc_cmd, below_normal_priority=True)
+    if result.returncode == 0 and temp_nvenc.exists() and temp_nvenc.stat().st_size > 0:
+        if output_path.exists():
+            output_path.unlink()
+        temp_nvenc.rename(output_path)
+        temp_cpu.unlink(missing_ok=True)
+        if log_callback:
+            log_callback(f"proxy success encoder=h264_nvenc output={output_path}")
+        return output_path
+
+    nvenc_error = result.stderr.strip() or result.stdout.strip() or "unknown ffmpeg error"
+    temp_nvenc.unlink(missing_ok=True)
+    if log_callback:
+        log_callback(f"h264_nvenc 不可用或失败，已回退到 CPU 低线程模式: {nvenc_error}")
+
+    cpu_cmd = [
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+        "-threads",
+        "1",
+        "-filter_threads",
+        "1",
+        "-filter_complex_threads",
+        "1",
+        "-y",
+        "-ss",
+        f"{start_seconds:.3f}",
+        "-t",
+        f"{duration_seconds:.3f}",
+        "-i",
+        str(input_path),
+        "-map",
+        "0:v:0",
+        "-dn",
+        "-sn",
+        "-vf",
+        scale_filter,
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "28",
+        "-pix_fmt",
+        "yuv420p",
+        "-an",
+        str(temp_cpu),
+    ]
+    if log_callback:
+        log_callback(f"proxy fallback mode={mode} windows_large_video=True encoder=libx264 threads=1 output={temp_cpu}")
+    result = run_ffmpeg(cpu_cmd, below_normal_priority=True)
+    if result.returncode != 0 or not temp_cpu.exists() or temp_cpu.stat().st_size == 0:
+        cpu_error = result.stderr.strip() or result.stdout.strip() or "unknown ffmpeg error"
+        temp_cpu.unlink(missing_ok=True)
+        raise RuntimeError(f"Windows 大视频 proxy 生成失败：{cpu_error}")
+
+    if output_path.exists():
+        output_path.unlink()
+    temp_cpu.rename(output_path)
+    if log_callback:
+        log_callback(f"proxy success encoder=libx264 fallback=True output={output_path}")
+    return output_path
+
+
 def make_segment_proxy_video(
     video_path: str | Path,
     segment_index: int,
@@ -73,9 +210,11 @@ def make_segment_proxy_video(
     duration_seconds: float = SEGMENT_SECONDS,
     output_dir: Path = SEGMENT_PROXY_DIR,
     target_bytes: int = TARGET_BYTES,
-    ffmpeg_threads: int = 1,
-    low_cpu: bool = True,
+    ffmpeg_threads: int | None = None,
+    low_cpu: bool = False,
     include_audio: bool = True,
+    windows_large_video_mode: str = "default",
+    log_callback=None,
 ) -> Path:
     ffmpeg = check_ffmpeg()
     input_path = Path(video_path).expanduser().resolve()
@@ -85,6 +224,20 @@ def make_segment_proxy_video(
     output_dir.mkdir(parents=True, exist_ok=True)
     safe_stem = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in input_path.stem)
     output_path = output_dir / f"{safe_stem}_segment_{segment_index:03d}_proxy.mp4"
+
+    if os.name == "nt" and windows_large_video_mode in WINDOWS_LARGE_VIDEO_MODES:
+        return make_windows_large_video_proxy(
+            ffmpeg,
+            input_path,
+            output_path,
+            start_seconds,
+            duration_seconds,
+            windows_large_video_mode,
+            log_callback=log_callback,
+        )
+
+    if log_callback:
+        log_callback(f"proxy mode=default windows_large_video=False encoder=libx264 output={output_path}")
 
     if low_cpu:
         attempts = [
@@ -130,8 +283,6 @@ def make_segment_proxy_video(
             "libx264",
             "-preset",
             preset,
-            "-threads",
-            str(max(1, ffmpeg_threads)),
             "-b:v",
             attempt["video_bitrate"],
             "-maxrate",
@@ -143,6 +294,8 @@ def make_segment_proxy_video(
             "-movflags",
             "+faststart",
         ]
+        if ffmpeg_threads is not None:
+            cmd.extend(["-threads", str(max(1, ffmpeg_threads))])
         if include_audio:
             cmd.extend([
                 "-map",
@@ -155,17 +308,20 @@ def make_segment_proxy_video(
         else:
             cmd.extend(["-an"])
         cmd.append(str(candidate))
-        creationflags = subprocess.BELOW_NORMAL_PRIORITY_CLASS if os.name == "nt" else 0
-        result = subprocess.run(cmd, capture_output=True, text=True, creationflags=creationflags)
+        result = run_ffmpeg(cmd)
         if result.returncode != 0:
             last_error = result.stderr.strip() or result.stdout.strip()
             candidate.unlink(missing_ok=True)
+            if log_callback:
+                log_callback(f"proxy failed encoder=libx264 attempt={attempt_index}: {last_error}")
             continue
 
         if candidate.stat().st_size <= target_bytes:
             if output_path.exists():
                 output_path.unlink()
             candidate.rename(output_path)
+            if log_callback:
+                log_callback(f"proxy success encoder=libx264 attempt={attempt_index} output={output_path}")
             return output_path
 
         if not output_path.exists() or candidate.stat().st_size < output_path.stat().st_size:
