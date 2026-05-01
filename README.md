@@ -4,6 +4,8 @@ Python tkinter MVP for analyzing whether a local video contains running, chasing
 
 ## Setup
 
+macOS/Linux:
+
 ```bash
 cd /Users/mac/nvidia-running-video-analyzer
 python3 -m venv .venv
@@ -14,6 +16,49 @@ python app.py
 ```
 
 You also need `ffmpeg` installed and available in `PATH`.
+
+Windows:
+
+1. Install Python 3 from [python.org](https://www.python.org/downloads/windows/). Enable `Add python.exe to PATH` during installation.
+2. Install ffmpeg:
+
+```bat
+winget install Gyan.FFmpeg
+```
+
+Close and reopen PowerShell or Command Prompt after installing ffmpeg.
+
+3. Download or clone this project, then run:
+
+```bat
+setup_windows.bat
+```
+
+4. Set your NVIDIA API key. For the current terminal only:
+
+```bat
+set NVIDIA_API_KEY=your_api_key
+```
+
+Or permanently:
+
+```bat
+setx NVIDIA_API_KEY "your_api_key"
+```
+
+After `setx`, close and reopen the terminal.
+
+5. Start the keyword clip extractor GUI:
+
+```bat
+run_keyword_extractor_windows.bat
+```
+
+You can also run directly:
+
+```bat
+.venv\Scripts\python.exe running_clip_extractor.py
+```
 
 ## Outputs
 
@@ -85,4 +130,12 @@ python running_clip_extractor.py --video "/path/to/video.mp4" --max-segments 12
 python running_clip_extractor.py --video "/path/to/video.mp4" --keywords "打架、追逐" --max-segments 12
 python running_clip_extractor.py --video "/path/to/video.mp4" --fresh
 python running_clip_extractor.py --video "/path/to/video.mp4" --retry-failed
+```
+
+Windows CLI examples:
+
+```bat
+.venv\Scripts\python.exe running_clip_extractor.py --video "C:\Users\you\Videos\movie.mp4" --keywords "跑步,追逐"
+.venv\Scripts\python.exe running_clip_extractor.py --video "C:\Users\you\Videos\movie.mp4" --fresh
+.venv\Scripts\python.exe running_clip_extractor.py --video "C:\Users\you\Videos\movie.mp4" --retry-failed
 ```
