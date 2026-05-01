@@ -73,6 +73,9 @@ def make_segment_proxy_video(
     duration_seconds: float = SEGMENT_SECONDS,
     output_dir: Path = SEGMENT_PROXY_DIR,
     target_bytes: int = TARGET_BYTES,
+    ffmpeg_threads: int = 1,
+    low_cpu: bool = True,
+    include_audio: bool = True,
 ) -> Path:
     ffmpeg = check_ffmpeg()
     input_path = Path(video_path).expanduser().resolve()
@@ -83,13 +86,22 @@ def make_segment_proxy_video(
     safe_stem = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in input_path.stem)
     output_path = output_dir / f"{safe_stem}_segment_{segment_index:03d}_proxy.mp4"
 
-    attempts = [
-        {"height": 480, "video_bitrate": "900k", "audio_bitrate": "64k"},
-        {"height": 360, "video_bitrate": "650k", "audio_bitrate": "48k"},
-        {"height": 360, "video_bitrate": "450k", "audio_bitrate": "32k"},
-        {"height": 240, "video_bitrate": "300k", "audio_bitrate": "32k"},
-        {"height": 240, "video_bitrate": "180k", "audio_bitrate": "24k"},
-    ]
+    if low_cpu:
+        attempts = [
+            {"height": 240, "video_bitrate": "260k", "audio_bitrate": "24k"},
+            {"height": 240, "video_bitrate": "180k", "audio_bitrate": "24k"},
+            {"height": 180, "video_bitrate": "140k", "audio_bitrate": "16k"},
+        ]
+        preset = "ultrafast"
+    else:
+        attempts = [
+            {"height": 480, "video_bitrate": "900k", "audio_bitrate": "64k"},
+            {"height": 360, "video_bitrate": "650k", "audio_bitrate": "48k"},
+            {"height": 360, "video_bitrate": "450k", "audio_bitrate": "32k"},
+            {"height": 240, "video_bitrate": "300k", "audio_bitrate": "32k"},
+            {"height": 240, "video_bitrate": "180k", "audio_bitrate": "24k"},
+        ]
+        preset = "veryfast"
 
     last_error = None
     for attempt_index, attempt in enumerate(attempts, start=1):
@@ -97,6 +109,10 @@ def make_segment_proxy_video(
         scale_filter = f"scale=-2:{attempt['height']}:force_original_aspect_ratio=decrease"
         cmd = [
             ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
             "-y",
             "-ss",
             f"{start_seconds:.3f}",
@@ -106,8 +122,6 @@ def make_segment_proxy_video(
             str(input_path),
             "-map",
             "0:v:0",
-            "-map",
-            "0:a?",
             "-dn",
             "-sn",
             "-vf",
@@ -115,7 +129,9 @@ def make_segment_proxy_video(
             "-c:v",
             "libx264",
             "-preset",
-            "veryfast",
+            preset,
+            "-threads",
+            str(max(1, ffmpeg_threads)),
             "-b:v",
             attempt["video_bitrate"],
             "-maxrate",
@@ -126,13 +142,21 @@ def make_segment_proxy_video(
             "yuv420p",
             "-movflags",
             "+faststart",
-            "-c:a",
-            "aac",
-            "-b:a",
-            attempt["audio_bitrate"],
-            str(candidate),
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        if include_audio:
+            cmd.extend([
+                "-map",
+                "0:a?",
+                "-c:a",
+                "aac",
+                "-b:a",
+                attempt["audio_bitrate"],
+            ])
+        else:
+            cmd.extend(["-an"])
+        cmd.append(str(candidate))
+        creationflags = subprocess.BELOW_NORMAL_PRIORITY_CLASS if os.name == "nt" else 0
+        result = subprocess.run(cmd, capture_output=True, text=True, creationflags=creationflags)
         if result.returncode != 0:
             last_error = result.stderr.strip() or result.stdout.strip()
             candidate.unlink(missing_ok=True)

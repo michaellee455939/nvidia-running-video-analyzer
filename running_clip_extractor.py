@@ -51,6 +51,14 @@ def normalize_keywords(keywords: str | None) -> str:
     return (keywords or DEFAULT_KEYWORDS).strip() or DEFAULT_KEYWORDS
 
 
+def parse_positive_int(value: str, default: int, minimum: int = 1, maximum: int = 9999) -> int:
+    try:
+        parsed = int(str(value).strip())
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, min(maximum, parsed))
+
+
 def get_video_output_dir(video_path: str | Path, keywords: str | None = None) -> Path:
     input_path = Path(video_path).expanduser().resolve()
     keyword_text = normalize_keywords(keywords)
@@ -314,6 +322,9 @@ def detect_and_extract_running_clips(
     max_segments: int | None = None,
     fresh: bool = False,
     retry_failed: bool = False,
+    low_cpu: bool = True,
+    ffmpeg_threads: int = 1,
+    include_audio_proxy: bool = False,
     stop_event: threading.Event | None = None,
     progress=None,
 ) -> list[dict]:
@@ -363,6 +374,10 @@ def detect_and_extract_running_clips(
     append_log(run_log_path, f"start/resume video={Path(video_path).expanduser().resolve()}")
     append_log(run_log_path, f"keywords={keywords}")
     append_log(run_log_path, f"duration={duration:.3f}s total_segments={total_segments} segment_seconds={segment_seconds}")
+    append_log(
+        run_log_path,
+        f"low_cpu={low_cpu} ffmpeg_threads={ffmpeg_threads} include_audio_proxy={include_audio_proxy}",
+    )
 
     for zero_index in range(total_segments):
         if stop_event and stop_event.is_set():
@@ -393,7 +408,15 @@ def detect_and_extract_running_clips(
         if progress:
             progress(f"正在生成检测 proxy：第 {segment_index}/{total_segments} 段 {start_time} - {end_time}")
         append_log(run_log_path, f"segment {segment_index}/{total_segments}: proxy start {start_time}-{end_time}")
-        proxy_path = make_segment_proxy_video(video_path, segment_index, segment_start, actual_duration)
+        proxy_path = make_segment_proxy_video(
+            video_path,
+            segment_index,
+            segment_start,
+            actual_duration,
+            ffmpeg_threads=ffmpeg_threads,
+            low_cpu=low_cpu,
+            include_audio=include_audio_proxy,
+        )
         append_log(run_log_path, f"segment {segment_index}: proxy={proxy_path} size={proxy_path.stat().st_size}")
 
         if stop_event and stop_event.is_set():
@@ -421,6 +444,9 @@ def detect_and_extract_running_clips(
                 "keywords": keywords,
                 "duration": duration,
                 "segment_seconds": segment_seconds,
+                "low_cpu": low_cpu,
+                "ffmpeg_threads": ffmpeg_threads,
+                "include_audio_proxy": include_audio_proxy,
                 "total_segments": total_segments,
                 "completed_segments": sorted(completed_segments),
                 "failed_segments": sorted(skipped_failed_segments),
@@ -482,6 +508,9 @@ def detect_and_extract_running_clips(
             "keywords": keywords,
             "duration": duration,
             "segment_seconds": segment_seconds,
+            "low_cpu": low_cpu,
+            "ffmpeg_threads": ffmpeg_threads,
+            "include_audio_proxy": include_audio_proxy,
             "total_segments": total_segments,
             "completed_segments": sorted(completed_segments),
             "failed_segments": sorted(skipped_failed_segments),
@@ -501,6 +530,9 @@ def detect_and_extract_running_clips(
         "keywords": keywords,
         "duration": duration,
         "segment_seconds": segment_seconds,
+        "low_cpu": low_cpu,
+        "ffmpeg_threads": ffmpeg_threads,
+        "include_audio_proxy": include_audio_proxy,
         "total_segments": total_segments,
         "completed_segments": sorted(completed_segments),
         "failed_segments": sorted(skipped_failed_segments),
@@ -521,6 +553,10 @@ class RunningClipExtractorApp:
         self.output_path = tk.StringVar(value="选择视频后自动生成")
         self.clip_dir = tk.StringVar(value="选择视频后自动生成")
         self.log_path = tk.StringVar(value="选择视频后自动生成")
+        self.segment_seconds = tk.StringVar(value=str(SEGMENT_SECONDS))
+        self.ffmpeg_threads = tk.StringVar(value="1")
+        self.low_cpu = tk.BooleanVar(value=True)
+        self.include_audio_proxy = tk.BooleanVar(value=False)
         self.fresh_run = tk.BooleanVar(value=False)
         self.retry_failed = tk.BooleanVar(value=False)
         self.stop_event = threading.Event()
@@ -554,44 +590,54 @@ class RunningClipExtractorApp:
         keyword_entry.grid(row=2, column=1, columnspan=2, sticky="we", pady=(10, 0))
         keyword_entry.bind("<KeyRelease>", lambda _event: self._refresh_output_paths())
 
-        tk.Label(frame, text="原画质片段目录：").grid(row=3, column=0, sticky="nw", pady=(10, 0))
-        tk.Label(frame, textvariable=self.clip_dir, anchor="w", justify="left", wraplength=700).grid(
-            row=3,
-            column=1,
-            sticky="we",
-            pady=(10, 0),
-        )
+        tk.Label(frame, text="性能设置：").grid(row=3, column=0, sticky="nw", pady=(10, 0))
+        perf_frame = tk.Frame(frame)
+        perf_frame.grid(row=3, column=1, columnspan=4, sticky="we", pady=(10, 0))
+        tk.Label(perf_frame, text="每段秒数").pack(side=tk.LEFT)
+        tk.Entry(perf_frame, textvariable=self.segment_seconds, width=6).pack(side=tk.LEFT, padx=(6, 14))
+        tk.Label(perf_frame, text="ffmpeg线程").pack(side=tk.LEFT)
+        tk.Entry(perf_frame, textvariable=self.ffmpeg_threads, width=4).pack(side=tk.LEFT, padx=(6, 14))
+        tk.Checkbutton(perf_frame, text="低CPU模式", variable=self.low_cpu).pack(side=tk.LEFT, padx=(0, 14))
+        tk.Checkbutton(perf_frame, text="proxy包含音频", variable=self.include_audio_proxy).pack(side=tk.LEFT)
 
-        tk.Label(frame, text="JSON 结果路径：").grid(row=4, column=0, sticky="nw", pady=(10, 0))
-        tk.Label(frame, textvariable=self.output_path, anchor="w", justify="left", wraplength=700).grid(
+        tk.Label(frame, text="原画质片段目录：").grid(row=4, column=0, sticky="nw", pady=(10, 0))
+        tk.Label(frame, textvariable=self.clip_dir, anchor="w", justify="left", wraplength=700).grid(
             row=4,
             column=1,
             sticky="we",
             pady=(10, 0),
         )
 
-        tk.Label(frame, text="运行日志路径：").grid(row=5, column=0, sticky="nw", pady=(10, 0))
-        tk.Label(frame, textvariable=self.log_path, anchor="w", justify="left", wraplength=700).grid(
+        tk.Label(frame, text="JSON 结果路径：").grid(row=5, column=0, sticky="nw", pady=(10, 0))
+        tk.Label(frame, textvariable=self.output_path, anchor="w", justify="left", wraplength=700).grid(
             row=5,
             column=1,
             sticky="we",
             pady=(10, 0),
         )
 
-        tk.Label(frame, text="当前处理状态：").grid(row=6, column=0, sticky="nw", pady=(10, 0))
-        tk.Label(frame, textvariable=self.status, anchor="w", justify="left", wraplength=700).grid(
+        tk.Label(frame, text="运行日志路径：").grid(row=6, column=0, sticky="nw", pady=(10, 0))
+        tk.Label(frame, textvariable=self.log_path, anchor="w", justify="left", wraplength=700).grid(
             row=6,
             column=1,
             sticky="we",
             pady=(10, 0),
         )
 
-        tk.Label(frame, text="检测与切片结果：").grid(row=7, column=0, columnspan=2, sticky="w", pady=(18, 6))
+        tk.Label(frame, text="当前处理状态：").grid(row=7, column=0, sticky="nw", pady=(10, 0))
+        tk.Label(frame, textvariable=self.status, anchor="w", justify="left", wraplength=700).grid(
+            row=7,
+            column=1,
+            sticky="we",
+            pady=(10, 0),
+        )
+
+        tk.Label(frame, text="检测与切片结果：").grid(row=8, column=0, columnspan=2, sticky="w", pady=(18, 6))
         self.output = scrolledtext.ScrolledText(frame, height=24, wrap=tk.WORD)
-        self.output.grid(row=8, column=0, columnspan=3, sticky="nsew")
+        self.output.grid(row=9, column=0, columnspan=5, sticky="nsew")
 
         frame.columnconfigure(1, weight=1)
-        frame.rowconfigure(8, weight=1)
+        frame.rowconfigure(9, weight=1)
 
     def choose_video(self) -> None:
         file_path = filedialog.askopenfilename(
@@ -640,10 +686,21 @@ class RunningClipExtractorApp:
         self.output.delete("1.0", tk.END)
         self.status.set("开始处理")
         keywords = normalize_keywords(self.keywords.get())
+        segment_seconds = parse_positive_int(self.segment_seconds.get(), SEGMENT_SECONDS, minimum=5, maximum=600)
+        ffmpeg_threads = parse_positive_int(self.ffmpeg_threads.get(), 1, minimum=1, maximum=8)
         self._refresh_output_paths()
         thread = threading.Thread(
             target=self._run_analysis,
-            args=(selected, keywords, self.fresh_run.get(), self.retry_failed.get()),
+            args=(
+                selected,
+                keywords,
+                self.fresh_run.get(),
+                self.retry_failed.get(),
+                segment_seconds,
+                ffmpeg_threads,
+                self.low_cpu.get(),
+                self.include_audio_proxy.get(),
+            ),
             daemon=True,
         )
         thread.start()
@@ -655,7 +712,17 @@ class RunningClipExtractorApp:
         self.output.see(tk.END)
         self.stop_button.config(state=tk.DISABLED)
 
-    def _run_analysis(self, selected: str, keywords: str, fresh: bool, retry_failed: bool) -> None:
+    def _run_analysis(
+        self,
+        selected: str,
+        keywords: str,
+        fresh: bool,
+        retry_failed: bool,
+        segment_seconds: int,
+        ffmpeg_threads: int,
+        low_cpu: bool,
+        include_audio_proxy: bool,
+    ) -> None:
         try:
             def progress(message: str) -> None:
                 self.events.put(("progress", message))
@@ -663,8 +730,12 @@ class RunningClipExtractorApp:
             results = detect_and_extract_running_clips(
                 selected,
                 keywords=keywords,
+                segment_seconds=segment_seconds,
                 fresh=fresh,
                 retry_failed=retry_failed,
+                low_cpu=low_cpu,
+                ffmpeg_threads=ffmpeg_threads,
+                include_audio_proxy=include_audio_proxy,
                 stop_event=self.stop_event,
                 progress=progress,
             )
@@ -714,18 +785,26 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Detect target content in 60s proxy clips and extract original-quality clips.")
     parser.add_argument("--video", help="Run without GUI and analyze this video path.")
     parser.add_argument("--keywords", default=DEFAULT_KEYWORDS, help="Target keywords to detect, separated by comma or Chinese comma.")
+    parser.add_argument("--segment-seconds", type=int, default=SEGMENT_SECONDS, help="Proxy segment length in seconds.")
     parser.add_argument("--max-segments", type=int, help="Only analyze the first N segments in CLI mode.")
     parser.add_argument("--fresh", action="store_true", help="Ignore resume state and start from the first segment.")
     parser.add_argument("--retry-failed", action="store_true", help="Retry segments recorded in failed_segments.json.")
+    parser.add_argument("--fast-proxy", action="store_true", help="Use higher-resolution/faster default proxy settings instead of low-CPU mode.")
+    parser.add_argument("--ffmpeg-threads", type=int, default=1, help="Limit ffmpeg x264 threads. Use 1 on busy Windows machines.")
+    parser.add_argument("--include-audio-proxy", action="store_true", help="Include audio in proxy clips. Higher CPU cost.")
     args = parser.parse_args()
 
     if args.video:
         results = detect_and_extract_running_clips(
             args.video,
             keywords=args.keywords,
+            segment_seconds=args.segment_seconds,
             max_segments=args.max_segments,
             fresh=args.fresh,
             retry_failed=args.retry_failed,
+            low_cpu=not args.fast_proxy,
+            ffmpeg_threads=args.ffmpeg_threads,
+            include_audio_proxy=args.include_audio_proxy,
             progress=print,
         )
         print(json.dumps(results, ensure_ascii=False, indent=2))

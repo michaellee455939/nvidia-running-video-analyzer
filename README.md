@@ -119,9 +119,16 @@ Outputs:
 
 The GUI has a `筛查关键字` input. The default is running-related keywords, but you can enter targets such as `打架、摔倒、抽烟、开枪、跳舞`.
 
+For very large files on Windows, keep `低CPU模式` enabled. The default GUI settings use one ffmpeg thread, lower-resolution proxy clips, and no audio in proxy clips to avoid maxing out CPU. If the source is 4K/large bitrate, start with:
+
+- `每段秒数`: `30` or `60`
+- `ffmpeg线程`: `1`
+- `低CPU模式`: enabled
+- `proxy包含音频`: disabled unless audio is required for the search target
+
 The extractor resumes automatically per video and keyword set. If a previous run stopped early, rerun the same command and completed or previously failed segments will be skipped. In the GUI, enable `重新从头处理` to ignore previous state and delete old clips/json for that video and keyword set before processing. Enable `重试失败段` to retry segments listed in `failed_segments.json`. Use `停止处理` to stop after the current ffmpeg/API call finishes safely.
 
-In CLI mode, use `--fresh` to restart or `--retry-failed` to retry failed segments.
+In CLI mode, use `--fresh` to restart or `--retry-failed` to retry failed segments. Low-CPU proxy generation is enabled by default; use `--ffmpeg-threads 1`, `--segment-seconds 30`, and leave audio out of proxy clips for large videos.
 
 CLI test mode:
 
@@ -130,6 +137,7 @@ python running_clip_extractor.py --video "/path/to/video.mp4" --max-segments 12
 python running_clip_extractor.py --video "/path/to/video.mp4" --keywords "打架、追逐" --max-segments 12
 python running_clip_extractor.py --video "/path/to/video.mp4" --fresh
 python running_clip_extractor.py --video "/path/to/video.mp4" --retry-failed
+python running_clip_extractor.py --video "/path/to/video.mp4" --segment-seconds 30 --ffmpeg-threads 1
 ```
 
 Windows CLI examples:
@@ -138,4 +146,5 @@ Windows CLI examples:
 .venv\Scripts\python.exe running_clip_extractor.py --video "C:\Users\you\Videos\movie.mp4" --keywords "跑步,追逐"
 .venv\Scripts\python.exe running_clip_extractor.py --video "C:\Users\you\Videos\movie.mp4" --fresh
 .venv\Scripts\python.exe running_clip_extractor.py --video "C:\Users\you\Videos\movie.mp4" --retry-failed
+.venv\Scripts\python.exe running_clip_extractor.py --video "C:\Users\you\Videos\movie.mp4" --segment-seconds 30 --ffmpeg-threads 1
 ```
