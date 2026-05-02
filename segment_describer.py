@@ -61,7 +61,7 @@ def get_video_duration(video_path: str | Path) -> float:
         "default=nw=1:nk=1",
         str(video_path),
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
     if result.returncode != 0:
         raise RuntimeError(f"ffprobe 读取视频时长失败：{result.stderr.strip()}")
     return float(result.stdout.strip())
@@ -79,7 +79,14 @@ def windows_large_video_thread_args(mode: str) -> list[str]:
 
 def run_ffmpeg(cmd: list[str], below_normal_priority: bool = False) -> subprocess.CompletedProcess:
     creationflags = subprocess.BELOW_NORMAL_PRIORITY_CLASS if os.name == "nt" and below_normal_priority else 0
-    return subprocess.run(cmd, capture_output=True, text=True, creationflags=creationflags)
+    return subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        creationflags=creationflags,
+    )
 
 
 def make_windows_large_video_proxy(

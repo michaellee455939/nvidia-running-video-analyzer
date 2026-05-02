@@ -93,7 +93,7 @@ def make_proxy_video(video_path: str, output_dir: Path = PROXY_DIR, target_bytes
             attempt["audio_bitrate"],
             str(candidate),
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
         if result.returncode != 0:
             last_error = result.stderr.strip() or result.stdout.strip()
             continue

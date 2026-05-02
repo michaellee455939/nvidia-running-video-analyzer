@@ -315,7 +315,7 @@ def extract_original_quality_clip(
         "make_zero",
         str(output_path),
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
     if result.returncode != 0:
         raise RuntimeError(f"原画质切片失败：{result.stderr.strip() or result.stdout.strip()}")
     if not output_path.exists() or output_path.stat().st_size == 0:
