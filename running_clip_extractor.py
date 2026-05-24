@@ -543,6 +543,7 @@ class RunningClipExtractorApp:
         self.root = root
         self.root.title("NVIDIA NIM 关键片段原画质提取")
         self.root.geometry("920x680")
+        self.video_paths: list[str] = []
         self.video_path = tk.StringVar(value="未选择")
         self.keywords = tk.StringVar(value=DEFAULT_KEYWORDS)
         self.status = tk.StringVar(value="就绪")
@@ -635,34 +636,46 @@ class RunningClipExtractorApp:
         frame.rowconfigure(9, weight=1)
 
     def choose_video(self) -> None:
-        file_path = filedialog.askopenfilename(
-            title="选择视频文件",
+        file_paths = filedialog.askopenfilenames(
+            title="选择一个或多个视频文件",
             filetypes=[
                 ("Video files", "*.mp4 *.mov *.m4v *.avi *.mkv *.webm"),
                 ("All files", "*.*"),
             ],
         )
-        if not file_path:
+        if not file_paths:
             return
-        self.video_path.set(file_path)
+        self.video_paths = list(file_paths)
+        self.video_path.set(self._format_selected_video_paths())
         self._refresh_output_paths()
-        self.status.set("已选择视频")
+        self.status.set(f"已选择 {len(self.video_paths)} 个视频")
         self.output.delete("1.0", tk.END)
         self.start_button.config(state=tk.NORMAL)
 
+    def _format_selected_video_paths(self) -> str:
+        if not self.video_paths:
+            return "未选择"
+        if len(self.video_paths) == 1:
+            return self.video_paths[0]
+        return f"共选择 {len(self.video_paths)} 个视频：\n" + "\n".join(self.video_paths)
+
     def _refresh_output_paths(self) -> None:
-        selected = self.video_path.get()
-        if selected == "未选择":
+        if not self.video_paths:
             return
-        output_dir = get_video_output_dir(selected, self.keywords.get())
-        self.clip_dir.set(str(output_dir))
-        self.output_path.set(str(output_dir / "matched_clips.json"))
-        self.log_path.set(str(output_dir / "run.log"))
+        if len(self.video_paths) == 1:
+            output_dir = get_video_output_dir(self.video_paths[0], self.keywords.get())
+            self.clip_dir.set(str(output_dir))
+            self.output_path.set(str(output_dir / "matched_clips.json"))
+            self.log_path.set(str(output_dir / "run.log"))
+            return
+        self.clip_dir.set("多个视频将分别保存在各自视频旁的 *_clips 目录")
+        self.output_path.set("多个视频将分别生成 matched_clips.json")
+        self.log_path.set("多个视频将分别生成 run.log")
 
     def start_analysis(self) -> None:
-        selected = self.video_path.get()
-        if selected == "未选择":
-            messagebox.showwarning("未选择视频", "请先选择一个本地视频文件。")
+        selected = list(self.video_paths)
+        if not selected:
+            messagebox.showwarning("未选择视频", "请先选择一个或多个本地视频文件。")
             return
 
         try:
@@ -679,7 +692,7 @@ class RunningClipExtractorApp:
         self.start_button.config(state=tk.DISABLED)
         self.stop_button.config(state=tk.NORMAL)
         self.output.delete("1.0", tk.END)
-        self.status.set("开始处理")
+        self.status.set(f"开始处理 {len(selected)} 个视频")
         keywords = normalize_keywords(self.keywords.get())
         segment_seconds = parse_positive_int(self.segment_seconds.get(), SEGMENT_SECONDS, minimum=5, maximum=600)
         windows_large_video_mode = WINDOWS_PREPROCESS_MODE_LABELS.get(self.windows_preprocess_mode.get(), "default")
@@ -707,7 +720,7 @@ class RunningClipExtractorApp:
 
     def _run_analysis(
         self,
-        selected: str,
+        selected: list[str],
         keywords: str,
         fresh: bool,
         retry_failed: bool,
@@ -718,17 +731,39 @@ class RunningClipExtractorApp:
             def progress(message: str) -> None:
                 self.events.put(("progress", message))
 
-            results = detect_and_extract_running_clips(
-                selected,
-                keywords=keywords,
-                segment_seconds=segment_seconds,
-                fresh=fresh,
-                retry_failed=retry_failed,
-                windows_large_video_mode=windows_large_video_mode,
-                stop_event=self.stop_event,
-                progress=progress,
-            )
-            self.events.put(("success", json.dumps(results, ensure_ascii=False, indent=2)))
+            batch_results = []
+            total_videos = len(selected)
+            for video_index, video_path in enumerate(selected, start=1):
+                if self.stop_event.is_set():
+                    progress("已请求停止，剩余视频不再处理")
+                    break
+
+                prefix = f"[{video_index}/{total_videos}] "
+                progress(f"{prefix}开始处理视频：{video_path}")
+
+                results = detect_and_extract_running_clips(
+                    video_path,
+                    keywords=keywords,
+                    segment_seconds=segment_seconds,
+                    fresh=fresh,
+                    retry_failed=retry_failed,
+                    windows_large_video_mode=windows_large_video_mode,
+                    stop_event=self.stop_event,
+                    progress=lambda message, prefix=prefix: progress(prefix + message),
+                )
+                output_dir = get_video_output_dir(video_path, keywords)
+                batch_results.append(
+                    {
+                        "video_path": str(Path(video_path).expanduser().resolve()),
+                        "output_dir": str(output_dir),
+                        "matched_clips_path": str(output_dir / "matched_clips.json"),
+                        "run_log_path": str(output_dir / "run.log"),
+                        "clip_count": len(results),
+                        "clips": results,
+                    }
+                )
+
+            self.events.put(("success", json.dumps(batch_results, ensure_ascii=False, indent=2)))
         except Exception as exc:
             DEBUG_DIR.mkdir(parents=True, exist_ok=True)
             (DEBUG_DIR / "running_clip_error.txt").write_text(traceback.format_exc(), encoding="utf-8")
@@ -772,7 +807,8 @@ def run_gui() -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Detect target content in 60s proxy clips and extract original-quality clips.")
-    parser.add_argument("--video", help="Run without GUI and analyze this video path.")
+    parser.add_argument("--video", action="append", help="Run without GUI and analyze this video path. Repeat for multiple videos.")
+    parser.add_argument("--videos", nargs="+", help="Run without GUI and analyze multiple video paths.")
     parser.add_argument("--keywords", default=DEFAULT_KEYWORDS, help="Target keywords to detect, separated by comma or Chinese comma.")
     parser.add_argument("--segment-seconds", type=int, default=SEGMENT_SECONDS, help="Proxy segment length in seconds.")
     parser.add_argument("--max-segments", type=int, help="Only analyze the first N segments in CLI mode.")
@@ -786,18 +822,43 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    selected_videos = []
     if args.video:
-        results = detect_and_extract_running_clips(
-            args.video,
-            keywords=args.keywords,
-            segment_seconds=args.segment_seconds,
-            max_segments=args.max_segments,
-            fresh=args.fresh,
-            retry_failed=args.retry_failed,
-            windows_large_video_mode=args.windows_large_video_mode,
-            progress=print,
-        )
-        print(json.dumps(results, ensure_ascii=False, indent=2))
+        selected_videos.extend(args.video)
+    if args.videos:
+        selected_videos.extend(args.videos)
+
+    if selected_videos:
+        batch_results = []
+        total_videos = len(selected_videos)
+        for video_index, video_path in enumerate(selected_videos, start=1):
+            prefix = f"[{video_index}/{total_videos}] "
+            print(f"{prefix}开始处理视频：{video_path}")
+            results = detect_and_extract_running_clips(
+                video_path,
+                keywords=args.keywords,
+                segment_seconds=args.segment_seconds,
+                max_segments=args.max_segments,
+                fresh=args.fresh,
+                retry_failed=args.retry_failed,
+                windows_large_video_mode=args.windows_large_video_mode,
+                progress=lambda message, prefix=prefix: print(prefix + message),
+            )
+            output_dir = get_video_output_dir(video_path, args.keywords)
+            batch_results.append(
+                {
+                    "video_path": str(Path(video_path).expanduser().resolve()),
+                    "output_dir": str(output_dir),
+                    "matched_clips_path": str(output_dir / "matched_clips.json"),
+                    "run_log_path": str(output_dir / "run.log"),
+                    "clip_count": len(results),
+                    "clips": results,
+                }
+            )
+        if len(batch_results) == 1:
+            print(json.dumps(batch_results[0]["clips"], ensure_ascii=False, indent=2))
+        else:
+            print(json.dumps(batch_results, ensure_ascii=False, indent=2))
     else:
         run_gui()
 

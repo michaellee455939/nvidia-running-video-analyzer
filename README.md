@@ -117,6 +117,8 @@ Outputs:
 - Latest-run JSON copy: `results/matched_clips.json`
 - Debug responses and errors: `debug/`
 
+The GUI can select one or more videos at once. When multiple videos are selected, they are processed sequentially and each video still writes its own `*_clips/` output folder next to the source file.
+
 The GUI has a `筛查关键字` input. The default is running-related keywords, but you can enter targets such as `打架、摔倒、抽烟、开枪、跳舞`.
 
 ### Windows Large Video Preprocessing
@@ -164,6 +166,8 @@ python running_clip_extractor.py --video "/path/to/video.mp4" --keywords "打架
 python running_clip_extractor.py --video "/path/to/video.mp4" --fresh
 python running_clip_extractor.py --video "/path/to/video.mp4" --retry-failed
 python running_clip_extractor.py --video "/path/to/video.mp4" --windows-large-video-mode balanced
+python running_clip_extractor.py --video "/path/to/a.mp4" --video "/path/to/b.mp4"
+python running_clip_extractor.py --videos "/path/to/a.mp4" "/path/to/b.mp4"
 ```
 
 Windows CLI examples:
@@ -174,4 +178,6 @@ Windows CLI examples:
 .venv\Scripts\python.exe running_clip_extractor.py --video "C:\Users\you\Videos\movie.mp4" --retry-failed
 .venv\Scripts\python.exe running_clip_extractor.py --video "C:\Users\you\Videos\movie.mp4" --windows-large-video-mode balanced
 .venv\Scripts\python.exe running_clip_extractor.py --video "C:\Users\you\Videos\movie.mp4" --windows-large-video-mode gentle
+.venv\Scripts\python.exe running_clip_extractor.py --video "C:\Users\you\Videos\a.mp4" --video "C:\Users\you\Videos\b.mp4"
+.venv\Scripts\python.exe running_clip_extractor.py --videos "C:\Users\you\Videos\a.mp4" "C:\Users\you\Videos\b.mp4"
 ```
